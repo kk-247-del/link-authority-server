@@ -1,16 +1,12 @@
 {
-  "name": "link-authority",
+  "name": "presence-queue-server",
   "version": "1.0.0",
-  "private": true,
-  "type": "module",
+  "description": "Scheduling queue for Presence App",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=18"
+    "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "sqlite3": "^5.1.7"
+    "socket.io": "^4.7.4"
   }
 }
