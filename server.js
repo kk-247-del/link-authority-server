@@ -1,127 +1,54 @@
-import express from 'express';
-import crypto from 'crypto';
-import { db } from './db.js';
-import { sign, verify, hashToken } from './crypto.js';
+const http = require('http');
+const { Server } = require('socket.io');
 
-const app = express();
-app.use(express.json());
-
-const now = () => Math.floor(Date.now() / 1000);
-
-/* ───────────────── CREATE LINK ───────────────── */
-
-app.post('/link/create', (req, res) => {
-  const { address, start } = req.body;
-
-  if (!address || !start || start <= now()) {
-    return res.status(400).json({ error: 'invalid_request' });
+const server = http.createServer();
+const io = new Server(server, {
+  cors: {
+    origin: "*", // Allows your Flutter app to connect from any device
+    methods: ["GET", "POST"]
   }
-
-  const payload = {
-    id: crypto.randomUUID(),
-    a: address,
-    start,
-    exp: start + 60,
-    v: 1,
-  };
-
-  const payloadBase64 = Buffer
-    .from(JSON.stringify(payload))
-    .toString('base64url');
-
-  const sig = sign(payloadBase64);
-  const token = `${payloadBase64}.${sig}`;
-  const tokenHash = hashToken(token);
-
-  db.run(
-    `
-    INSERT INTO link_tokens
-      (token_hash, address, start_ts, exp_ts, created_at)
-    VALUES (?, ?, ?, ?, ?)
-    `,
-    [tokenHash, address, payload.start, payload.exp, now()],
-    err => {
-      if (err) {
-        return res.status(409).json({ error: 'link_exists' });
-      }
-      res.json({ token });
-    }
-  );
 });
-
-/* ───────────────── RESOLVE LINK ───────────────── */
-
-app.post('/link/resolve', (req, res) => {
-  const { token } = req.body;
-
-  if (!token || !token.includes('.')) {
-    return res.json({ status: 'used' });
-  }
-
-  const [payloadBase64, sig] = token.split('.');
-  if (!verify(payloadBase64, sig)) {
-    return res.json({ status: 'used' });
-  }
-
-  const tokenHash = hashToken(token);
-
-  db.get(
-    `SELECT * FROM link_tokens WHERE token_hash = ?`,
-    [tokenHash],
-    (err, row) => {
-      if (!row || row.used) {
-        return res.json({ status: 'used' });
-      }
-
-      if (now() < row.start_ts) {
-        return res.json({
-          status: 'tooEarly',
-          secondsLeft: row.start_ts - now(),
-        });
-      }
-
-      if (now() > row.exp_ts) {
-        return res.json({ status: 'expired' });
-      }
-
-      res.json({ status: 'ready' });
-    }
-  );
-});
-
-/* ───────────────── CONSUME LINK ───────────────── */
-
-app.post('/link/consume', (req, res) => {
-  const { token } = req.body;
-  if (!token) return res.status(400).end();
-
-  const tokenHash = hashToken(token);
-
-  db.run(
-    `
-    UPDATE link_tokens
-    SET used = 1
-    WHERE token_hash = ? AND used = 0
-    `,
-    [tokenHash],
-    function () {
-      if (this.changes === 0) {
-        return res.status(409).json({ ok: false });
-      }
-      res.json({ ok: true });
-    }
-  );
-});
-
-/* ───────────────── HEALTH (RAILWAY) ───────────────── */
-
-app.get('/health', (_, res) => {
-  res.json({ ok: true });
-});
-
-/* ───────────────── START ───────────────── */
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Link Authority running on port ${PORT}`);
+
+io.on('connection', (socket) => {
+  console.log('User connected:', socket.id);
+
+  // Users must "register" with their unique Presence ID
+  socket.on('register', (userId) => {
+    socket.join(userId);
+    console.log(`User ${userId} joined their private room.`);
+  });
+
+  // A sends a request to B
+  socket.on('send_request', (data) => {
+    // data: { from: 'Alice', to: 'Bob', time: '14:00', note: 'Sync' }
+    const requestId = `req_${Date.now()}`;
+    io.to(data.to).emit('receive_request', { ...data, id: requestId });
+    console.log(`Request sent from ${data.from} to ${data.to}`);
+  });
+
+  // B responds to A
+  socket.on('respond', (data) => {
+    // data: { to: 'Alice', from: 'Bob', status: 'counter', time: '15:00', id: 'req_123' }
+    if (data.status === 'counter') {
+      // For a counter, we essentially flip the request
+      io.to(data.to).emit('receive_request', {
+        ...data,
+        isCounter: true
+      });
+    } else {
+      // For Accept/Decline, we just notify the original sender
+      io.to(data.to).emit('decision_final', data);
+    }
+    console.log(`Response (${data.status}) from ${data.from} to ${data.to}`);
+  });
+
+  socket.on('disconnect', () => {
+    console.log('User disconnected:', socket.id);
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(`Queue Server running on port ${PORT}`);
 });
